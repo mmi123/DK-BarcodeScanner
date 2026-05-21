@@ -2,83 +2,75 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Digi-Key QR Logger</title>
+  <title>Digi-Key Data Matrix Scanner</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
-  <style>
-    body { font-family: sans-serif; padding: 1rem; }
-    #reader { width: 100%; max-width: 400px; margin: 0 auto; }
-    #result { margin-top: 1rem; font-size: 0.9rem; word-wrap: break-word; }
-    button { margin-top: 0.5rem; padding: 0.5rem 1rem; }
-  </style>
-</head>
-<body>
-  <h2>Digi-Key QR → Google Sheet</h2>
-  <div id="reader"></div>
-  <div id="result">Waiting for scan…</div>
-  <button id="resetBtn">Reset</button>
+  <script type="module">
+    import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.4/+esm";
 
-  <script>
-    // TODO: replace with your Apps Script web app URL
-    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxbsyuh5DS9GAYQ2KVzanMAPsqiLY2Yyt4QZ2RG63AvoU4Koj2o1NeWu2y3LEafgm08/exec";
+    const SCRIPT_URL = "https://script.google.com/macros/s/XXXXXXXXXXXX/exec";
+
+    const codeReader = new BrowserMultiFormatReader();
+    let selectedDeviceId = null;
+
+    async function startScanner() {
+      const devices = await BrowserMultiFormatReader.listVideoInputDevices();
+      selectedDeviceId = devices[0].deviceId;
+
+      codeReader.decodeFromVideoDevice(
+        selectedDeviceId,
+        "video",
+        (result, err) => {
+          if (result) {
+            const text = result.getText();
+            document.getElementById("result").textContent = "Scanned: " + text;
+
+            const payload = parseDigiKeyPayload(text);
+            sendToSheet(payload);
+
+            codeReader.reset();
+          }
+        }
+      );
+    }
 
     function parseDigiKeyPayload(text) {
-      // Start simple: just return raw.
-      // You can add smarter parsing once you inspect a few QR payloads.
-      // Example: if text is like "P=PARTNUM;Q=100;..." you can split on ';'
-      let part = '';
-      let qty  = '';
+      let part = "";
+      let qty = "";
 
-      // naive example parser:
-      if (text.includes('P=') || text.includes('Q=')) {
-        const segments = text.split(';');
-        segments.forEach(seg => {
-          const [k, v] = seg.split('=');
-          if (!k || !v) return;
-          if (k === 'P') part = v;
-          if (k === 'Q') qty  = v;
-        });
+      // Example: DataMatrix often encodes GS1-style fields
+      // e.g. (01)PARTNUMBER(30)QTY
+      if (text.includes("(01)") || text.includes("(30)")) {
+        const p = text.match(/\(01\)([^\(]+)/);
+        const q = text.match(/\(30\)([^\(]+)/);
+        if (p) part = p[1];
+        if (q) qty = q[1];
       }
 
       return { raw: text, part, qty };
     }
 
     function sendToSheet(payload) {
-      return fetch(SCRIPT_URL, {
+      fetch(SCRIPT_URL, {
         method: "POST",
-        mode: "no-cors", // Apps Script often works fine with this; you won't see response though
-        headers: {
-          "Content-Type": "application/json"
-        },
+        mode: "no-cors",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
     }
 
-    function onScanSuccess(decodedText, decodedResult) {
-      const resultDiv = document.getElementById('result');
-      resultDiv.textContent = "Scanned: " + decodedText;
-
-      const payload = parseDigiKeyPayload(decodedText);
-      sendToSheet(payload);
-
-      // Optionally stop scanning after first success:
-      html5QrcodeScanner.clear();
-    }
-
-    function onScanFailure(error) {
-      // ignore; scanner keeps running
-    }
-
-    const html5QrcodeScanner = new Html5QrcodeScanner(
-      "reader",
-      { fps: 10, qrbox: { width: 250, height: 250 } },
-      false
-    );
-    html5QrcodeScanner.render(onScanSuccess, onScanFailure);
-
-    document.getElementById('resetBtn').addEventListener('click', () => {
-      window.location.reload();
-    });
+    window.onload = startScanner;
   </script>
+
+  <style>
+    body { font-family: sans-serif; padding: 1rem; }
+    #video { width: 100%; max-width: 400px; }
+    #result { margin-top: 1rem; font-size: 1rem; }
+  </style>
+</head>
+
+<body>
+  <h2>Digi-Key Data Matrix → Google Sheet</h2>
+  <video id="video" autoplay></video>
+  <div id="result">Waiting for scan…</div>
 </body>
 </html>
