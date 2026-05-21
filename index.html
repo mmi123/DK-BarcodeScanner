@@ -2,75 +2,272 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Digi-Key Data Matrix Scanner</title>
+  <title>Digi-Key Data Matrix → Google Sheet</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <script type="module">
-    import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.4/+esm";
 
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 1rem;
+      background: #f5f5f5;
+    }
+    h1 {
+      font-size: 1.3rem;
+      margin-bottom: 0.5rem;
+    }
+    #video-container {
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    #video {
+      width: 100%;
+      height: auto;
+    }
+    #status {
+      margin-top: 0.75rem;
+      font-size: 0.95rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      background: #fff;
+      max-width: 480px;
+      margin-left: auto;
+      margin-right: auto;
+      word-wrap: break-word;
+    }
+    #status.ok {
+      border-left: 4px solid #2e7d32;
+    }
+    #status.error {
+      border-left: 4px solid #c62828;
+    }
+    #fields {
+      margin-top: 0.75rem;
+      font-size: 0.9rem;
+      max-width: 480px;
+      margin-left: auto;
+      margin-right: auto;
+      background: #fff;
+      border-radius: 6px;
+      padding: 0.5rem 0.75rem;
+    }
+    #fields div {
+      margin-bottom: 0.25rem;
+    }
+    #controls {
+      margin-top: 0.75rem;
+      text-align: center;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      font-size: 0.95rem;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      margin: 0 0.25rem;
+    }
+    #btn-rescan {
+      background: #1976d2;
+      color: #fff;
+    }
+    #btn-rescan:disabled {
+      background: #90caf9;
+      cursor: default;
+    }
+  </style>
+
+  <script type="module">
+    import { BrowserMultiFormatReader, BarcodeFormat, DecodeHintType } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.4/+esm";
+
+    // TODO: replace with your Apps Script Web App URL
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxbsyuh5DS9GAYQ2KVzanMAPsqiLY2Yyt4QZ2RG63AvoU4Koj2o1NeWu2y3LEafgm08/exec";
 
-    const codeReader = new BrowserMultiFormatReader();
-    let selectedDeviceId = null;
+    const hints = new Map();
+    // Restrict to Data Matrix for faster/more reliable scanning
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.DATA_MATRIX]);
 
-    async function startScanner() {
-      const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-      selectedDeviceId = devices[0].deviceId;
+    const codeReader = new BrowserMultiFormatReader(hints);
+    let currentDeviceId = null;
+    let scanning = false;
 
-      codeReader.decodeFromVideoDevice(
-        selectedDeviceId,
-        "video",
-        (result, err) => {
-          if (result) {
-            const text = result.getText();
-            document.getElementById("result").textContent = "Scanned: " + text;
+    function setStatus(message, type = "") {
+      const el = document.getElementById("status");
+      el.textContent = message;
+      el.className = "";
+      if (type) el.classList.add(type);
+    }
 
-            const payload = parseDigiKeyPayload(text);
-            sendToSheet(payload);
-
-            codeReader.reset();
-          }
-        }
-      );
+    function showFields(data) {
+      const el = document.getElementById("fields");
+      el.innerHTML = `
+        <div><strong>DK Part:</strong> ${data.part || "-"}</div>
+        <div><strong>MPN:</strong> ${data.mfgPart || "-"}</div>
+        <div><strong>Qty:</strong> ${data.qty || "-"}</div>
+        <div><strong>Date Code:</strong> ${data.dateCode || "-"}</div>
+        <div><strong>Country:</strong> ${data.country || "-"}</div>
+        <div><strong>Sales Order:</strong> ${data.salesOrder || "-"}</div>
+        <div><strong>Invoice:</strong> ${data.invoice || "-"}</div>
+      `;
     }
 
     function parseDigiKeyPayload(text) {
-      let part = "";
-      let qty = "";
+      // Normalize line breaks and strip header
+      const lines = text
+        .replace("[)>", "")
+        .replace("06", "")
+        .split(/[\r\n]+|\u001d|\u001e/g) // handle GS separators if present
+        .map(l => l.trim())
+        .filter(l => l.length > 0);
 
-      // Example: DataMatrix often encodes GS1-style fields
-      // e.g. (01)PARTNUMBER(30)QTY
-      if (text.includes("(01)") || text.includes("(30)")) {
-        const p = text.match(/\(01\)([^\(]+)/);
-        const q = text.match(/\(30\)([^\(]+)/);
-        if (p) part = p[1];
-        if (q) qty = q[1];
+      let part = "";
+      let mfgPart = "";
+      let qty = "";
+      let dateCode = "";
+      let country = "";
+      let salesOrder = "";
+      let invoice = "";
+
+      for (const line of lines) {
+        if (line.startsWith("30P")) {
+          part = line.substring(3);
+        } else if (line.startsWith("P")) {
+          part = line.substring(1);
+        } else if (line.startsWith("1P")) {
+          mfgPart = line.substring(2);
+        } else if (line.startsWith("Q")) {
+          qty = line.substring(1);
+        } else if (line.startsWith("9D")) {
+          dateCode = line.substring(2);
+        } else if (line.startsWith("4L")) {
+          country = line.substring(2);
+        } else if (line.startsWith("1K")) {
+          salesOrder = line.substring(2);
+        } else if (line.startsWith("10K")) {
+          invoice = line.substring(3);
+        }
       }
 
-      return { raw: text, part, qty };
+      return {
+        raw: text,
+        part,
+        mfgPart,
+        qty,
+        dateCode,
+        country,
+        salesOrder,
+        invoice
+      };
     }
 
     function sendToSheet(payload) {
-      fetch(SCRIPT_URL, {
+      // You can remove no-cors and handle response if you add CORS headers in Apps Script
+      return fetch(SCRIPT_URL, {
         method: "POST",
         mode: "no-cors",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
+      }).catch(err => {
+        console.error(err);
       });
     }
 
-    window.onload = startScanner;
+    async function startScanner() {
+      if (scanning) return;
+      scanning = true;
+      document.getElementById("btn-rescan").disabled = true;
+      setStatus("Initializing camera…");
+
+      try {
+        const devices = await BrowserMultiFormatReader.listVideoInputDevices();
+        if (!devices || devices.length === 0) {
+          setStatus("No camera devices found.", "error");
+          scanning = false;
+          return;
+        }
+
+        // Prefer back camera if available
+        const backCam = devices.find(d =>
+          /back|rear|environment/i.test(d.label)
+        );
+        currentDeviceId = (backCam || devices[0]).deviceId;
+
+        await codeReader.decodeFromVideoDevice(
+          currentDeviceId,
+          "video",
+          (result, err) => {
+            if (result) {
+              const text = result.getText();
+              codeReader.reset();
+              scanning = false;
+              document.getElementById("btn-rescan").disabled = false;
+
+              setStatus("Code scanned, sending to sheet…", "ok");
+
+              const parsed = parseDigiKeyPayload(text);
+              showFields(parsed);
+              sendToSheet(parsed);
+
+              setStatus("Logged to sheet. Ready for next scan.", "ok");
+            }
+          }
+        );
+
+        setStatus("Point the camera at a Digi-Key Data Matrix label.");
+      } catch (e) {
+        console.error(e);
+        setStatus("Error starting camera: " + e.message, "error");
+        scanning = false;
+        document.getElementById("btn-rescan").disabled = false;
+      }
+    }
+
+    function stopScanner() {
+      codeReader.reset();
+      scanning = false;
+    }
+
+    window.addEventListener("load", () => {
+      document.getElementById("btn-rescan").addEventListener("click", () => {
+        stopScanner();
+        showFields({
+          part: "",
+          mfgPart: "",
+          qty: "",
+          dateCode: "",
+          country: "",
+          salesOrder: "",
+          invoice: ""
+        });
+        setStatus("Restarting scanner…");
+        startScanner();
+      });
+
+      startScanner();
+    });
   </script>
-
-  <style>
-    body { font-family: sans-serif; padding: 1rem; }
-    #video { width: 100%; max-width: 400px; }
-    #result { margin-top: 1rem; font-size: 1rem; }
-  </style>
 </head>
-
 <body>
-  <h2>Digi-Key Data Matrix → Google Sheet</h2>
-  <video id="video" autoplay></video>
-  <div id="result">Waiting for scan…</div>
+  <h1>Digi-Key Data Matrix → Google Sheet V2</h1>
+  <div id="video-container">
+    <video id="video" autoplay playsinline></video>
+  </div>
+
+  <div id="status">Initializing…</div>
+  <div id="fields">
+    <div><strong>DK Part:</strong> -</div>
+    <div><strong>MPN:</strong> -</div>
+    <div><strong>Qty:</strong> -</div>
+    <div><strong>Date Code:</strong> -</div>
+    <div><strong>Country:</strong> -</div>
+    <div><strong>Sales Order:</strong> -</div>
+    <div><strong>Invoice:</strong> -</div>
+  </div>
+
+  <div id="controls">
+    <button id="btn-rescan" disabled>Rescan</button>
+  </div>
 </body>
 </html>
